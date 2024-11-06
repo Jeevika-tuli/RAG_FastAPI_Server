@@ -1,0 +1,110 @@
+Content of document_metadata.py
+
+import fitz  # PyMuPDF for PDF
+import docx  # python-docx for DOCX files
+import os
+from typing import Dict
+
+# Extract metadata from a PDF file
+def extract_pdf_metadata(file_path: str) -> Dict[str, str]:
+    doc = fitz.open(file_path)
+    metadata = doc.metadata  # PyMuPDF gives document metadata directly
+    return {
+        "title": metadata.get("title", "Unknown Title"),
+        "author": metadata.get("author", "Unknown Author"),
+        "created": metadata.get("created", "Unknown Date")
+    }
+
+# Extract metadata from a DOCX file
+def extract_docx_metadata(file_path: str) -> Dict[str, str]:
+    doc = docx.Document(file_path)
+    properties = doc.core_properties
+    return {
+        "title": properties.title if properties.title else "Unknown Title",
+        "author": properties.author if properties.author else "Unknown Author",
+        "created": str(properties.created) if properties.created else "Unknown Date"
+    }
+
+# Extract metadata from a TXT file
+def extract_txt_metadata(file_path: str) -> Dict[str, str]:
+    # For TXT files, we can assume there are no predefined metadata
+    # So we return some default values or add your custom logic here
+    return {
+        "title": os.path.basename(file_path),  # Using the filename as the title
+        "author": "Unknown Author",
+        "created": "Unknown Date"
+    }
+
+# Main function to extract metadata based on file type
+def extract_document_metadata(file_path: str) -> Dict[str, str]:
+    file_extension = os.path.splitext(file_path)[1].lower()
+    
+    if file_extension == ".pdf":
+        return extract_pdf_metadata(file_path)
+    elif file_extension in [".docx", ".doc"]:
+        return extract_docx_metadata(file_path)
+    elif file_extension == ".txt":
+        return extract_txt_metadata(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+
+How It Works:
+PDF Metadata: Using PyMuPDF (fitz), we extract the metadata from a PDF document. This includes the title, author, and the creation date of the document.
+
+DOCX Metadata: With python-docx, we extract the core properties (like title, author, and creation date) from DOCX files.
+
+TXT Metadata: For .txt files, since metadata isn’t typically available, we simply return default values like the filename as the title and unknown author/date.
+
+Usage:
+You can now integrate this metadata extraction into your main.py file to store and query these document attributes along with the text and embeddings.
+
+Integrating Metadata into main.py :
+
+from document_metadata import extract_document_metadata
+
+@app.post("/upload_document")
+async def upload_document(file: UploadFile = File(...)):
+    if file.content_type not in ["application/pdf", "application/msword", 
+                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                                 "text/plain"]:
+        raise HTTPException(status_code=400, detail="File type not supported")
+    
+    # Save uploaded file temporarily
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    async with aiofiles.open(file_path, "wb") as f:
+        while content := await file.read(1024):
+            await f.write(content)
+    
+    # Extract text and metadata based on file type
+    document_text = ""
+    metadata = {}
+    if file.content_type == "application/pdf":
+        document_text = extract_text_from_pdf(file_path)
+        metadata = extract_document_metadata(file_path)
+    elif file.content_type == "application/msword" or file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        document_text = extract_text_from_docx(file_path)
+        metadata = extract_document_metadata(file_path)
+    elif file.content_type == "text/plain":
+        document_text = extract_text_from_txt(file_path)
+        metadata = extract_document_metadata(file_path)
+
+    # Ingest document with metadata in background
+    def ingest():
+        embedding = model.encode(document_text)  # Get embedding for the document text
+        chroma_client.insert({
+            "text": document_text, 
+            "embedding": embedding.tolist(),
+            "metadata": metadata  # Store metadata along with text and embedding
+        })
+    
+    executor.submit(ingest)
+
+    return JSONResponse(content={"message": "Document uploaded and ingestion started."})
+Benefits of This Approach:
+Richer Search Results: By adding metadata like document title, author, and creation date, you allow more contextual searches. For instance, a user might search for documents by author or title, making the query more useful.
+
+Better Document Context: When returning a document for a query, you can include metadata like the title and author to make the result more informative and easier to interpret.
+
+Real-World Use Case: In many document management systems, metadata is as important as the document’s content itself. This approach makes the server more production-ready by aligning it with real-world document systems.
