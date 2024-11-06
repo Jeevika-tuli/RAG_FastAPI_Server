@@ -1,0 +1,76 @@
+
+### Code for `main.py`
+Now, let’s dive into the FastAPI server code:
+
+```python
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import ingest_document
+from concurrent.futures import ThreadPoolExecutor
+import aiofiles
+import os
+import tempfile
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Initialize ChromaDB client with persistent settings
+chroma_client = chromadb.Client(Settings(persist_directory="./chromadb_data"))
+
+# Load the Hugging Face model
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+# Create a ThreadPoolExecutor for handling concurrency
+executor = ThreadPoolExecutor()
+
+# Document upload endpoint
+@app.post("/upload_document")
+async def upload_document(file: UploadFile = File(...)):
+    if file.content_type not in ["application/pdf", "application/msword", 
+                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                                 "text/plain"]:
+        raise HTTPException(status_code=400, detail="File type not supported")
+    
+    # Save uploaded file temporarily
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    async with aiofiles.open(file_path, "wb") as f:
+        while content := await file.read(1024):
+            await f.write(content)
+    
+    # Ingest document in background
+    def ingest():
+        # Extract text and embed
+        document_text = ingest_document(file_path)
+        embedding = model.encode(document_text)
+        
+        # Insert document into ChromaDB
+        chroma_client.insert({"text": document_text, "embedding": embedding.tolist()})
+    
+    executor.submit(ingest)
+
+    return JSONResponse(content={"message": "Document uploaded and ingestion started."})
+
+# Query model for retrieval
+class QueryRequest(BaseModel):
+    query_text: str
+
+@app.post("/query_document")
+async def query_document(query_request: QueryRequest):
+    # Create embedding for the query
+    query_embedding = model.encode(query_request.query_text)
+    
+    # Retrieve the most similar document
+    result = chroma_client.query(query_embedding.tolist())
+    
+    if not result:
+        return JSONResponse(content={"message": "No relevant documents found."})
+    
+    return JSONResponse(content={"document": result[0]["text"]})
+
+# Run the server with: uvicorn main:app --reload
