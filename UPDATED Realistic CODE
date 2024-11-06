@@ -1,0 +1,142 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+from concurrent.futures import ThreadPoolExecutor
+import aiofiles
+import os
+import tempfile
+import fitz  # PyMuPDF for PDF
+import docx  # python-docx for DOCX files
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Initialize ChromaDB client with persistent settings
+chroma_client = chromadb.Client(Settings(persist_directory="./chromadb_data"))
+
+# Load the Hugging Face model for sentence embeddings
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+# Create a ThreadPoolExecutor for handling concurrency
+executor = ThreadPoolExecutor()
+
+# Function to extract text from PDF
+def extract_text_from_pdf(file_path: str) -> str:
+    doc = fitz.open(file_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+# Function to extract text from DOCX
+def extract_text_from_docx(file_path: str) -> str:
+    doc = docx.Document(file_path)
+    text = ""
+    for para in doc.paragraphs:
+        text += para.text + "\n"
+    return text
+
+# Function to extract text from TXT files
+def extract_text_from_txt(file_path: str) -> str:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        text = file.read()
+    return text
+
+# Document upload endpoint
+@app.post("/upload_document")
+async def upload_document(file: UploadFile = File(...)):
+    # Check for supported file types
+    if file.content_type not in ["application/pdf", "application/msword", 
+                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                                 "text/plain"]:
+        raise HTTPException(status_code=400, detail="File type not supported")
+    
+    # Save uploaded file temporarily
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    async with aiofiles.open(file_path, "wb") as f:
+        while content := await file.read(1024):
+            await f.write(content)
+    
+    # Extract text based on file type
+    if file.content_type == "application/pdf":
+        document_text = extract_text_from_pdf(file_path)
+    elif file.content_type == "application/msword" or file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        document_text = extract_text_from_docx(file_path)
+    elif file.content_type == "text/plain":
+        document_text = extract_text_from_txt(file_path)
+
+    # Ingest document in background
+    def ingest():
+        embedding = model.encode(document_text)  # Get embedding for the document text
+        chroma_client.insert({"text": document_text, "embedding": embedding.tolist()})
+    
+    executor.submit(ingest)
+
+    return JSONResponse(content={"message": "Document uploaded and ingestion started."})
+
+# Query model for document retrieval
+class QueryRequest(BaseModel):
+    query_text: str
+
+@app.post("/query_document")
+async def query_document(query_request: QueryRequest):
+    # Create embedding for the query
+    query_embedding = model.encode(query_request.query_text)
+    
+    # Retrieve the most similar document from ChromaDB
+    result = chroma_client.query(query_embedding.tolist())
+    
+    if not result:
+        return JSONResponse(content={"message": "No relevant documents found."})
+    
+    return JSONResponse(content={"document": result[0]["text"]})
+
+# Run the server with: uvicorn main:app --reload
+
+Key Enhancements and Details:
+Text Extraction:
+
+We now use PyMuPDF (fitz) for extracting text from PDF files.
+python-docx is used to extract text from DOCX files.
+Plain text files (TXT) are simply read and returned.
+ChromaDB Setup:
+
+ChromaDB is initialized with a persistent directory (./chromadb_data), so the data persists across server restarts. This is where all document embeddings are stored.
+Each document’s text is converted into embeddings using sentence-transformers/all-MiniLM-L6-v2, and then it is inserted into ChromaDB.
+Document Ingestion:
+
+Document ingestion happens asynchronously using ThreadPoolExecutor, which ensures that the main FastAPI server remains responsive during document processing.
+Query Endpoint:
+
+When a user queries the server, the server generates embeddings for the query and looks for the most similar document in the database using ChromaDB.
+Running the Server:
+To run the FastAPI app:
+
+Install the necessary dependencies:
+
+bash
+Copy code
+pip install -r requirements.txt
+Run the FastAPI server:
+
+bash
+Copy code
+uvicorn main:app --reload
+Test the endpoints:
+
+Upload a document via the /upload_document endpoint using POST with a file.
+Query a document via the /query_document endpoint using POST with a JSON body containing a query_text.
+How to Test:
+Upload Documents:
+
+You can upload documents in PDF, DOCX, or TXT formats, and they will be stored in ChromaDB with their embeddings.
+Query Documents:
+
+You can send a query (a search phrase or question) to the /query_document endpoint. The server will find the most relevant document based on its embedding and return it.
+Final Notes:
+This code is now much closer to a production-ready FastAPI server handling document uploads and retrieval using RAG principles with ChromaDB and embeddings. You can push this code to your GitHub repository and submit it as part of your assignment.
